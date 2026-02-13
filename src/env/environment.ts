@@ -3,9 +3,11 @@ import type { IQWebSocket } from "../client/ws.ts";
 import type { AccountAPI } from "../api/account.ts";
 import type { AssetsAPI } from "../api/assets.ts";
 import type { CandlesAPI } from "../api/candles.ts";
+import type { CandlesAPIInterface } from "./types.ts";
 import type { TradingAPI } from "../api/trading.ts";
 import type { SubscriptionsAPI } from "../api/subscriptions.ts";
 import type { Position, BlitzOptionConfig, BalanceChanged } from "../types/index.ts";
+import { authenticateWs } from "../client/auth.ts";
 import type {
   Action,
   Observation,
@@ -13,6 +15,8 @@ import type {
   TradingEnvironmentInterface,
   Agent,
 } from "./types.ts";
+import type { AgentContext } from "./agent-context.ts";
+import type { EventBus } from "../events/bus.ts";
 import { SensorManager } from "./sensors.ts";
 import { ActionExecutor } from "./actions.ts";
 import { EnvironmentState } from "./state.ts";
@@ -23,13 +27,17 @@ export class TradingEnvironment implements TradingEnvironmentInterface {
   state: EnvironmentState;
   rules: EnvironmentRules;
 
+  private protocol: Protocol;
   private ws: IQWebSocket;
   private account: AccountAPI;
   private assets: AssetsAPI;
   private trading: TradingAPI;
+  private subscriptions: SubscriptionsAPI;
 
   private userId: number = 0;
   private balanceId: number = 0;
+  private ssid: string = "";
+  private eventBus: EventBus | null = null;
 
   constructor(
     protocol: Protocol,
@@ -40,10 +48,12 @@ export class TradingEnvironment implements TradingEnvironmentInterface {
     trading: TradingAPI,
     subscriptions: SubscriptionsAPI,
   ) {
+    this.protocol = protocol;
     this.ws = ws;
     this.account = account;
     this.assets = assets;
     this.trading = trading;
+    this.subscriptions = subscriptions;
 
     this.sensors = new SensorManager(candles, trading, subscriptions);
     this.state = new EnvironmentState();
@@ -81,23 +91,78 @@ export class TradingEnvironment implements TradingEnvironmentInterface {
       this.rules.minBet = Math.min(...minBets);
     }
 
-    // Listen for position changes to update state
-    this.trading.onPositionChanged((pos: Position) => {
+    // Subscribe to position changes and option-closed on the server
+    this.trading.subscribePositions(this.userId, this.balanceId, (pos: Position) => {
       this.state.onPositionChanged(pos);
+      if (this.eventBus) {
+        this.eventBus.emit("position:changed", {
+          positionId: pos.id,
+          status: pos.status as "open" | "closed",
+          activeId: pos.active_id,
+        });
+      }
     });
+    this.protocol.subscribe("option-closed", undefined, {});
 
     // Subscribe to balance-changed for real-time balance updates
     this.account.subscribeBalanceChanged((data: BalanceChanged) => {
       if (data.current_balance.id === this.balanceId) {
+        const previousBalance = this.state.balance;
         this.state.balance = data.current_balance.amount;
+        if (this.eventBus) {
+          this.eventBus.emit("wallet:changed", {
+            balance: data.current_balance.amount,
+            previousBalance,
+            reason: "balance-changed",
+          });
+        }
       }
     });
 
     console.log(`[Environment] Initialized: user=${this.userId}, balance=$${this.state.balance}, assets=${this.state.availableAssets.length}`);
+
+    // Setup reconnect handler — re-auth and re-subscribe everything
+    this.ws.onReconnect(async () => {
+      console.log("[Environment] Reconnected — re-authenticating...");
+      try {
+        await authenticateWs(this.protocol, this.ssid);
+        this.account.setOptions({ sendResults: true });
+        this.sensors.resubscribeAll();
+        // Re-subscribe balance-changed
+        this.protocol.subscribe("balance-changed", "1.0", {});
+        // Re-subscribe position-changed (TradingAPI handlers are still registered)
+        this.protocol.subscribe("portfolio.position-changed", "3.0", {
+          user_id: this.userId,
+          user_balance_id: this.balanceId,
+          instrument_type: "blitz-option",
+        });
+        this.protocol.subscribe("option-closed", undefined, {});
+        console.log("[Environment] Reconnect complete — all subscriptions restored");
+        if (this.eventBus) {
+          this.eventBus.emit("ws:reconnected", {});
+        }
+      } catch (err) {
+        console.error("[Environment] Reconnect re-auth failed:", (err as Error).message);
+      }
+    });
   }
+
+  /** Wire an EventBus for emitting environment events. */
+  setEventBus(bus: EventBus): void { this.eventBus = bus; }
+
+  /** Store the ssid for reconnect re-authentication. */
+  setSsid(ssid: string): void { this.ssid = ssid; }
 
   getUserId(): number { return this.userId; }
   getBalanceId(): number { return this.balanceId; }
+
+  prefillSensor(sensorId: string, data: unknown[]): void {
+    this.sensors.prefill(sensorId, data);
+  }
+
+  getCandlesAPI(): CandlesAPIInterface {
+    return this.sensors.getCandlesAPI();
+  }
 
   /** Get remaining seconds until a position expires. Returns 0 if already expired or no expiration set. */
   getRemainingTime(position: Position): number {
@@ -124,8 +189,14 @@ export class TradingEnvironment implements TradingEnvironmentInterface {
     for (const action of actions) {
       try {
         await this.actions.execute(action);
+        if (this.eventBus) {
+          this.eventBus.emit("action:executed", { actionType: action.type, payload: action.payload });
+        }
       } catch (err) {
         console.error(`[Environment] Action ${action.type} failed:`, (err as Error).message);
+        if (this.eventBus) {
+          this.eventBus.emit("action:failed", { actionType: action.type, payload: action.payload, error: (err as Error).message });
+        }
       }
     }
   }
@@ -139,9 +210,9 @@ export class TradingEnvironment implements TradingEnvironmentInterface {
   }
 
   /** Run an agent in the event-driven loop */
-  async runAgent(agent: Agent): Promise<void> {
+  async runAgent(agent: Agent, ctx?: AgentContext): Promise<void> {
     console.log(`[Environment] Starting agent: ${agent.name}`);
-    await agent.initialize(this);
+    await agent.initialize(this, ctx);
 
     // On every sensor update, get observation and let agent decide
     this.sensors.onUpdate(async (_sensorId, _data) => {
@@ -156,13 +227,11 @@ export class TradingEnvironment implements TradingEnvironmentInterface {
       }
     });
 
-    // Forward trade results to agent
-    this.trading.onPositionChanged((pos: Position) => {
-      if (pos.status === "closed") {
-        agent.onTradeResult(pos);
-      }
-    });
-
     console.log(`[Environment] Agent ${agent.name} running. Waiting for sensor data...`);
+  }
+
+  /** Get the trading API for direct position subscriptions (used by Runner). */
+  getTradingAPI(): TradingAPI {
+    return this.trading;
   }
 }

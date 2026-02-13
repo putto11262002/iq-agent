@@ -1,4 +1,5 @@
 import type { CandlesAPI } from "../api/candles.ts";
+import type { CandlesAPIInterface } from "./types.ts";
 import type { TradingAPI } from "../api/trading.ts";
 import type { SubscriptionsAPI } from "../api/subscriptions.ts";
 import type { Candle, Position, Order } from "../types/index.ts";
@@ -31,7 +32,7 @@ export class SensorManager {
         const activeId = sensor.params.active_id as number;
         const size = sensor.params.size as number;
         this.candles.subscribeCandles(activeId, size, (candle: Candle) => {
-          this.pushData(sensor.id, candle);
+          this.pushCandle(sensor.id, candle);
         });
         break;
       }
@@ -110,6 +111,88 @@ export class SensorManager {
     for (const cb of this.updateCallbacks) {
       cb(sensorId, data);
     }
+  }
+
+  /** Push candle data, replacing the last entry if it has the same `from` timestamp (mid-candle update). */
+  private pushCandle(sensorId: string, candle: Candle): void {
+    const buffer = this.sensorData.get(sensorId);
+    if (!buffer) return;
+
+    // If the latest entry has the same `from`, replace it (mid-candle update)
+    if (buffer.length > 0) {
+      const last = buffer[buffer.length - 1] as Candle;
+      if (last.from === candle.from) {
+        buffer[buffer.length - 1] = candle;
+        for (const cb of this.updateCallbacks) {
+          cb(sensorId, candle);
+        }
+        return;
+      }
+    }
+
+    // New candle — push normally
+    buffer.push(candle);
+    if (buffer.length > this.maxBufferSize) {
+      buffer.shift();
+    }
+
+    for (const cb of this.updateCallbacks) {
+      cb(sensorId, candle);
+    }
+  }
+
+  /** Pre-fill a sensor's buffer with historical data (no callbacks triggered). */
+  prefill(sensorId: string, data: unknown[]): void {
+    const buffer = this.sensorData.get(sensorId);
+    if (!buffer) return;
+    for (const item of data) {
+      buffer.push(item);
+      if (buffer.length > this.maxBufferSize) buffer.shift();
+    }
+  }
+
+  /** Expose candles API for historical data fetching. */
+  getCandlesAPI(): CandlesAPIInterface { return this.candles; }
+
+  /** Re-send server-side subscribe messages for all active sensors (after WS reconnect). */
+  resubscribeAll(): void {
+    for (const sensor of this.activeSensors.values()) {
+      switch (sensor.type) {
+        case "candle": {
+          const activeId = sensor.params.active_id as number;
+          const size = sensor.params.size as number;
+          this.candles.resubscribeCandles(activeId, size);
+          break;
+        }
+        case "mood": {
+          const activeId = sensor.params.active_id as number;
+          this.subscriptions.subscribe("traders-mood-changed", undefined, {
+            asset_id: activeId,
+            instrument_type: "turbo-option",
+          });
+          break;
+        }
+        case "position": {
+          const userId = sensor.params.user_id as number;
+          const balanceId = sensor.params.balance_id as number;
+          this.subscriptions.subscribe("portfolio.position-changed", "3.0", {
+            user_id: userId,
+            user_balance_id: balanceId,
+            instrument_type: "blitz-option",
+          });
+          break;
+        }
+        case "order": {
+          const userId = sensor.params.user_id as number;
+          this.subscriptions.subscribe("portfolio.order-changed", "2.0", {
+            user_id: userId,
+            instrument_type: "blitz-option",
+          });
+          break;
+        }
+      }
+    }
+    console.log(`[Sensors] Resubscribed ${this.activeSensors.size} sensors`);
   }
 
   // Helper to build sensor IDs

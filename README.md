@@ -12,17 +12,16 @@ bun install
 echo 'IQ_EMAIL=you@example.com' >> .env
 echo 'IQ_PASSWORD=yourpassword' >> .env
 
-# List available assets
-bun start -- list
+# Run an agent live (connects to IQ Option)
+bun run src/cli/cli.ts agents run macd --active 76
+bun run src/cli/cli.ts agents run momentum --active 76 --config tradeAmount=50
 
-# Trade EURUSD OTC with default momentum agent
-bun start -- 76
+# List available agents
+bun run src/cli/cli.ts agents list
 
-# Trade by name
-bun start -- AAPL
-
-# Configure
-TRADE_AMOUNT=50 EXPIRATION_SIZE=30 CANDLE_SIZE=1 bun start -- 76
+# Backtest an agent offline (no IQ connection needed)
+bun run src/cli/cli.ts dataset create --name eurusd-5s --active 76 --candle-size 5 --from 2026-02-10 --to 2026-02-13
+bun run src/cli/cli.ts backtest macd --dataset eurusd-5s --balance 100
 ```
 
 ## Architecture
@@ -52,6 +51,72 @@ All types are derived from Zod schemas via `z.infer<>`. Schemas live in `src/sch
 - Server spells it `"loose"` not `"lose"` — `PositionSchema` matches the server spelling
 - `balance-changed` wraps data in `{ current_balance: { ... } }` — `BalanceChangedSchema` unwraps this
 
+## CLI
+
+All commands go through `bun run src/cli/cli.ts <command>`.
+
+### Live Trading
+
+```bash
+# List registered agents
+bun run src/cli/cli.ts agents list
+
+# Run an agent (connects to IQ Option WebSocket)
+bun run src/cli/cli.ts agents run <agentName> --active <id> [--config key=value ...]
+
+# Examples
+bun run src/cli/cli.ts agents run macd --active 76
+bun run src/cli/cli.ts agents run macd --active 76 --config tradeAmount=50 expirationSize=30
+```
+
+### Dataset Management
+
+Datasets store historical candle data in SQLite for offline backtesting. Creating a dataset requires an IQ Option connection (one-time); after that, all backtests run fully offline.
+
+```bash
+# Create a dataset (fetches candles from IQ Option)
+bun run src/cli/cli.ts dataset create --name eurusd-5s --active 76 --candle-size 5 --from 2026-02-10 --to 2026-02-13
+
+# List datasets
+bun run src/cli/cli.ts dataset list
+
+# Delete a dataset
+bun run src/cli/cli.ts dataset delete eurusd-5s
+```
+
+### Backtesting
+
+Run agents against historical data at full speed — no waiting for real-time candles.
+
+```bash
+# Basic backtest
+bun run src/cli/cli.ts backtest macd --dataset eurusd-5s --balance 100
+
+# Multiple datasets
+bun run src/cli/cli.ts backtest macd --dataset eurusd-5s,eurusd-jan --balance 100
+
+# Override payout percentage
+bun run src/cli/cli.ts backtest macd --dataset eurusd-5s --balance 100 --payout 85
+
+# Pass agent config overrides
+bun run src/cli/cli.ts backtest macd --dataset eurusd-5s --balance 100 --config tradeAmount=10
+```
+
+Output includes: trades, win rate, PnL, max drawdown, final balance, and a run ID. Use the run ID with `events`, `stats`, or `replay` commands for further analysis.
+
+### Observability
+
+```bash
+# View events for a run
+bun run src/cli/cli.ts events <runId>
+
+# View run stats
+bun run src/cli/cli.ts stats <runId>
+
+# Replay event timeline
+bun run src/cli/cli.ts replay <runId>
+```
+
 ## Writing a New Agent
 
 Implement the `Agent` interface from `src/env/types.ts`:
@@ -59,7 +124,7 @@ Implement the `Agent` interface from `src/env/types.ts`:
 ```ts
 interface Agent {
   name: string;
-  initialize(env: TradingEnvironmentInterface): Promise<void>;
+  initialize(env: TradingEnvironmentInterface, ctx?: AgentContext): Promise<void>;
   onObservation(obs: Observation): Promise<Action[]>;
   onTradeResult(position: Position): void;
 }
@@ -71,10 +136,12 @@ interface Agent {
 // src/bot/agents/my-agent.ts
 import type { Position } from "../../types/index.ts";
 import type { Agent, Action, Observation, TradingEnvironmentInterface } from "../../env/types.ts";
+import type { AgentContext } from "../../env/agent-context.ts";
 import { SensorManager } from "../../env/sensors.ts";
 
 export class MyAgent implements Agent {
   name = "MyAgent";
+  private ctx: AgentContext | undefined;
   private balanceId = 0;
   private activeId: number;
 
@@ -82,7 +149,8 @@ export class MyAgent implements Agent {
     this.activeId = activeId;
   }
 
-  async initialize(env: TradingEnvironmentInterface): Promise<void> {
+  async initialize(env: TradingEnvironmentInterface, ctx?: AgentContext): Promise<void> {
+    this.ctx = ctx;
     this.balanceId = env.getBalanceId();
 
     // Subscribe to 1-second candles
@@ -158,15 +226,39 @@ Return these from `onObservation()`:
 | `position` | `position:{balanceId}` | `Position` | `portfolio.position-changed` subscription |
 | `order` | `order:{userId}` | `Order` | `portfolio.order-changed` subscription |
 
-### Wiring Your Agent
+### Registering Your Agent
 
-In `src/index.ts`, replace the `MomentumAgent` instantiation:
+Add your agent to the factory in `src/bot/agents/index.ts` so the CLI can load it:
 
 ```ts
-import { MyAgent } from "./bot/agents/my-agent.ts";
-const agent = new MyAgent(targetConfig.active_id);
-await env.runAgent(agent);
+// In your agent file, export a factory function:
+export function createAgent(config: Record<string, unknown>): Agent {
+  return new MyAgent(config);
+}
 ```
+
+Then run it: `bun run src/cli/cli.ts agents run my-agent --active 76`
+
+Agents run identically in live and backtest — the same code, same interface, no changes needed.
+
+### AgentContext
+
+The optional `ctx` parameter in `initialize` provides:
+
+| Method / Field | Description |
+|---|---|
+| `ctx.now()` | Current time (seconds). Server time in live, simulated time in backtest. Use this instead of `Date.now()`. |
+| `ctx.runId` | Unique run identifier |
+| `ctx.events.emit(type, payload)` | Emit agent events (must be `agent:*` prefixed) |
+| `ctx.events.on(type, handler)` | Listen for events |
+| `ctx.wallet.getBalance()` | Current wallet balance |
+| `ctx.wallet.getDrawdown()` | Current drawdown |
+| `ctx.wallet.getMaxDrawdown()` | Peak drawdown |
+| `ctx.trades.getHistory()` | Fetch trade history for this run |
+| `ctx.log.debug(msg, data?)` | Emit debug event |
+| `ctx.log.signal(dir, confidence, reasons)` | Emit signal event |
+
+**Important:** Always use `ctx.now()` (or `obs.timestamp`) for time-dependent logic like cooldowns and pause timers. Using `Date.now()` will break in backtests where simulated time differs from wall clock.
 
 ### Helpers
 
@@ -174,14 +266,9 @@ await env.runAgent(agent);
 // Remaining seconds on an open position
 const remaining = env.getRemainingTime(position);
 
-// Switch demo/real balance
-await account.changeBalance(realBalanceId);
-
-// Get historical candles
-const candles = await candles.getCandles(activeId, 60, fromTs, toTs);
-
-// Get traders mood
-const mood = await subscriptions.getTradersMood(76); // 0-1 ratio
+// Get historical candles via environment
+const api = env.getCandlesAPI();
+const candles = await api.getCandles(activeId, 60, fromTs, toTs);
 ```
 
 ## Testing
@@ -223,10 +310,22 @@ test("fixture matches MySchema", () => {
 |---|---|---|---|
 | `IQ_EMAIL` | Yes | - | IQ Option account email |
 | `IQ_PASSWORD` | Yes | - | IQ Option account password |
-| `TRADE_AMOUNT` | No | `30` | Bet size per trade |
-| `EXPIRATION_SIZE` | No | `60` | Trade expiry in seconds |
-| `CANDLE_SIZE` | No | `1` | Candle timeframe in seconds |
-| `ACTIVE` | No | `76` | Asset ID or name (alternative to CLI arg) |
+| `API_URL` | No | `http://localhost:4400` | Server URL for event persistence and run tracking |
+
+Agent-specific settings (trade amount, expiration, candle size) are configured via `--config key=value` CLI flags rather than environment variables.
+
+## Data Storage
+
+All data is stored in `data/trading.db` (SQLite with WAL mode):
+
+| Table | Purpose |
+|---|---|
+| `runs` | Run metadata (agent, config, start/stop time, status) |
+| `trades` | Individual trade records (entry/exit price, PnL, result) |
+| `events` | Full event log (every action, trade, position change) |
+| `snapshots` | Periodic wallet snapshots (balance, drawdown over time) |
+| `datasets` | Backtest dataset metadata (asset, candle size, date range) |
+| `dataset_candles` | Historical candle OHLCV data for backtesting |
 
 ## Protocol Reference
 

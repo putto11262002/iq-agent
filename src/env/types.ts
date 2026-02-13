@@ -1,4 +1,14 @@
 import type { Position, BlitzOptionConfig, Candle } from "../types/index.ts";
+import type { AgentContext } from "./agent-context.ts";
+
+// Interface for candles data access — implemented by both live CandlesAPI and BacktestCandlesAPI
+export interface CandlesAPIInterface {
+  getCandles(activeId: number, size: number, from: number, to: number): Promise<Candle[]>;
+  getFirstCandles(activeId: number, size?: number, count?: number): Promise<Candle[]>;
+  subscribeCandles(activeId: number, size: number, handler: (candle: Candle) => void): void;
+  unsubscribeCandles(activeId: number, size: number): void;
+  resubscribeCandles(activeId: number, size: number): void;
+}
 
 // Sensor descriptor — a named data stream the agent can subscribe/unsubscribe
 export interface Sensor {
@@ -64,7 +74,7 @@ export interface EnvironmentRules {
 // The agent interface — can be algorithm, RL, or LLM
 export interface Agent {
   name: string;
-  initialize(env: TradingEnvironmentInterface): Promise<void>;
+  initialize(env: TradingEnvironmentInterface, ctx?: AgentContext): Promise<void>;
   onObservation(obs: Observation): Promise<Action[]>;
   onTradeResult(position: Position): void;
 }
@@ -77,4 +87,6 @@ export interface TradingEnvironmentInterface {
   getRules(): EnvironmentRules;
   getUserId(): number;
   getBalanceId(): number;
+  prefillSensor(sensorId: string, data: unknown[]): void;
+  getCandlesAPI(): CandlesAPIInterface;
 }
