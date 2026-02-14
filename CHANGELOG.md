@@ -1,14 +1,15 @@
 # Changelog
 
-## 2026-02-14 (CLI: Assets & Auth SSID)
+## 2026-02-14 (CLI: Assets, Auth SSID & `iq` command)
 
 ### Added
-- `cli assets list` command — browse available blitz-option assets (ID, name, payout, min/max bet, deadtime, expiries, status)
-- `cli assets list --all` — include disabled/suspended assets
-- `cli auth ssid` command — get SSID session token via profile (shows cached status)
+- `iq assets list` command — browse available blitz-option assets (ID, name, payout, min/max bet, deadtime, expiries, status)
+- `iq assets list --all` — include disabled/suspended assets
+- `iq auth ssid` command — get SSID session token via profile (shows cached status)
+- `iq` global command via `bun link` — run `iq <command>` from anywhere instead of `bun run src/cli/cli.ts <command>`
 
 ### Changed
-- `auth ssid` requires a profile (no .env fallback) — add a profile first with `cli auth add`
+- `auth ssid` requires a profile (no .env fallback) — add a profile first with `iq auth add`
 
 ---
 

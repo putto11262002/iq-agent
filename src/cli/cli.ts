@@ -1,3 +1,4 @@
+#!/usr/bin/env bun
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 import { api, apiFetch } from "./api.ts";
@@ -882,7 +883,7 @@ const configOption = {
 };
 
 yargs(hideBin(process.argv))
-  .scriptName("cli")
+  .scriptName("iq")
   .command(
     "list [status]",
     "List all runs",
