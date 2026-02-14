@@ -341,6 +341,38 @@ async function authDefault(name: string) {
   }
 }
 
+async function authSsid(explicitProfile?: string) {
+  const { login } = await import("../client/auth.ts");
+
+  // Try profile first
+  const profileName = await resolveProfile(explicitProfile);
+  if (profileName) {
+    try {
+      const profileRes = await apiFetch(`/api/auth/profiles/${encodeURIComponent(profileName)}/ssid`, "POST");
+      if (profileRes.ok) {
+        const data = await profileRes.json() as { ssid: string };
+        console.log(`  Profile: ${profileName}`);
+        console.log(`  SSID:    ${data.ssid}`);
+        return;
+      }
+    } catch {
+      // Fall through to .env
+    }
+  }
+
+  // Fallback to .env credentials
+  const email = process.env.IQ_EMAIL;
+  const password = process.env.IQ_PASSWORD;
+  if (!email || !password) {
+    console.error("No auth available. Add a profile or set IQ_EMAIL+IQ_PASSWORD env vars.");
+    return;
+  }
+
+  const result = await login(email, password);
+  console.log(`  Source:  ${profileName ? `profile "${profileName}"` : ".env credentials"}`);
+  console.log(`  SSID:    ${result.ssid}`);
+}
+
 // ─── Agent handlers ───
 
 async function agentsList() {
@@ -988,6 +1020,15 @@ yargs(hideBin(process.argv))
             yargs.positional("name", { type: "string", demandOption: true }),
           async (argv) => {
             await authDefault(argv.name!);
+          },
+        )
+        .command(
+          "ssid",
+          "Get SSID session token",
+          (yargs) =>
+            yargs.option("profile", { type: "string", describe: "Auth profile name" }),
+          async (argv) => {
+            await authSsid(argv.profile);
           },
         )
         .demandCommand(1, "Please specify an auth subcommand."),
