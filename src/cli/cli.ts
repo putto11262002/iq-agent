@@ -1,3 +1,4 @@
+#!/usr/bin/env bun
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 import { api, apiFetch } from "./api.ts";
@@ -341,6 +342,26 @@ async function authDefault(name: string) {
   }
 }
 
+async function authSsid(explicitProfile?: string) {
+  const profileName = await resolveProfile(explicitProfile);
+  if (!profileName) {
+    console.error("No profile found. Add one with: cli auth add --profile <name> --email <e> --password <p> --default");
+    return;
+  }
+
+  const profileRes = await apiFetch(`/api/auth/profiles/${encodeURIComponent(profileName)}/ssid`, "POST");
+  if (!profileRes.ok) {
+    const err = await profileRes.json().catch(() => ({})) as Record<string, unknown>;
+    console.error(`Failed to get SSID for profile "${profileName}":`, err.error ?? "unknown error");
+    return;
+  }
+
+  const data = await profileRes.json() as { ssid: string; cached: boolean };
+  console.log(`  Profile: ${profileName}`);
+  console.log(`  SSID:    ${data.ssid}`);
+  console.log(`  Cached:  ${data.cached ? "yes" : "no (fresh login)"}`);
+}
+
 // ─── Agent handlers ───
 
 async function agentsList() {
@@ -501,14 +522,20 @@ async function agentsRun(
 
 // ─── Dataset handlers ───
 
+function generateDatasetName(activeId: number, candleSize: number, fromDate: string, toDate: string): string {
+  const fromTag = fromDate.replace(/-/g, "");
+  const toTag = toDate.replace(/-/g, "");
+  return `${activeId}_${candleSize}s_${fromTag}_${toTag}`;
+}
+
 async function datasetCreate(
-  name: string,
   activeId: number,
   candleSize: number,
   fromDate: string,
   toDate: string,
   explicitProfile?: string,
 ) {
+  const name = generateDatasetName(activeId, candleSize, fromDate, toDate);
   const fromTs = Math.floor(new Date(fromDate).getTime() / 1000);
   const toTs = Math.floor(new Date(toDate).getTime() / 1000);
 
@@ -677,6 +704,41 @@ async function datasetDelete(name: string) {
   await db.delete(datasetCandles).where(eq(datasetCandles.dataset, name));
   await db.delete(datasets).where(eq(datasets.name, name));
   console.log(`Dataset "${name}" deleted.`);
+}
+
+async function datasetExport(name: string, outputPath?: string) {
+  const { db } = await import("../server/db/index.ts");
+  const { datasets, datasetCandles } = await import("../server/db/schema.ts");
+  const { eq } = await import("drizzle-orm");
+
+  const ds = await db.query.datasets.findFirst({
+    where: eq(datasets.name, name),
+  });
+  if (!ds) {
+    console.error(`Dataset "${name}" not found.`);
+    return;
+  }
+
+  const candles = await db
+    .select()
+    .from(datasetCandles)
+    .where(eq(datasetCandles.dataset, name))
+    .orderBy(datasetCandles.from);
+
+  if (candles.length === 0) {
+    console.error(`Dataset "${name}" has no candles.`);
+    return;
+  }
+
+  const filePath = outputPath || `./${name}.csv`;
+  const lines = ["timestamp,open,high,low,close,volume"];
+  for (const c of candles) {
+    lines.push(`${c.from},${c.open},${c.max},${c.min},${c.close},${c.volume}`);
+  }
+
+  const { writeFileSync } = await import("fs");
+  writeFileSync(filePath, lines.join("\n") + "\n");
+  console.log(`Exported ${candles.length} candles to ${filePath}`);
 }
 
 // ─── Assets handler ───
@@ -862,7 +924,7 @@ const configOption = {
 };
 
 yargs(hideBin(process.argv))
-  .scriptName("cli")
+  .scriptName("iq")
   .command(
     "list [status]",
     "List all runs",
@@ -990,6 +1052,15 @@ yargs(hideBin(process.argv))
             await authDefault(argv.name!);
           },
         )
+        .command(
+          "ssid",
+          "Get SSID session token",
+          (yargs) =>
+            yargs.option("profile", { type: "string", describe: "Auth profile name" }),
+          async (argv) => {
+            await authSsid(argv.profile);
+          },
+        )
         .demandCommand(1, "Please specify an auth subcommand."),
     () => {},
   )
@@ -1064,14 +1135,13 @@ yargs(hideBin(process.argv))
           "Create a dataset from IQ Option candles",
           (yargs) =>
             yargs
-              .option("name", { type: "string", demandOption: true, describe: "Dataset name" })
               .option("active", { type: "number", demandOption: true, describe: "Asset active ID" })
               .option("candle-size", { type: "number", demandOption: true, describe: "Candle size in seconds" })
               .option("from", { type: "string", demandOption: true, describe: "Start date (YYYY-MM-DD)" })
               .option("to", { type: "string", demandOption: true, describe: "End date (YYYY-MM-DD)" })
               .option("profile", { type: "string", describe: "Auth profile name" }),
           async (argv) => {
-            await datasetCreate(argv.name, argv.active, argv.candleSize, argv.from, argv.to, argv.profile);
+            await datasetCreate(argv.active, argv.candleSize, argv.from, argv.to, argv.profile);
           },
         )
         .command(
@@ -1089,6 +1159,17 @@ yargs(hideBin(process.argv))
             yargs.positional("name", { type: "string", demandOption: true }),
           async (argv) => {
             await datasetDelete(argv.name!);
+          },
+        )
+        .command(
+          "export <name>",
+          "Export a dataset to CSV",
+          (yargs) =>
+            yargs
+              .positional("name", { type: "string", demandOption: true, describe: "Dataset name" })
+              .option("output", { type: "string", describe: "Output file path (default: ./<name>.csv)" }),
+          async (argv) => {
+            await datasetExport(argv.name!, argv.output);
           },
         )
         .demandCommand(1, "Please specify a dataset subcommand."),

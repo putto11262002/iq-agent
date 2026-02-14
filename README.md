@@ -20,8 +20,8 @@ bun run src/cli/cli.ts agents run momentum --active 76 --config tradeAmount=50
 bun run src/cli/cli.ts agents list
 
 # Backtest an agent offline (no IQ connection needed)
-bun run src/cli/cli.ts dataset create --name eurusd-5s --active 76 --candle-size 5 --from 2026-02-10 --to 2026-02-13
-bun run src/cli/cli.ts backtest macd --dataset eurusd-5s --balance 100
+bun run src/cli/cli.ts dataset create --active 76 --candle-size 5 --from 2026-02-10 --to 2026-02-13
+bun run src/cli/cli.ts backtest macd --dataset 76_5s_20260210_20260213 --balance 100
 ```
 
 ## Architecture
@@ -102,13 +102,18 @@ Datasets store historical candle data in SQLite for offline backtesting. Creatin
 
 ```bash
 # Create a dataset (fetches candles from IQ Option)
-bun run src/cli/cli.ts dataset create --name eurusd-5s --active 76 --candle-size 5 --from 2026-02-10 --to 2026-02-13
+# Name is auto-generated: 76_5s_20260210_20260213
+bun run src/cli/cli.ts dataset create --active 76 --candle-size 5 --from 2026-02-10 --to 2026-02-13
 
 # List datasets
 bun run src/cli/cli.ts dataset list
 
+# Export dataset to CSV
+bun run src/cli/cli.ts dataset export 76_5s_20260210_20260213
+bun run src/cli/cli.ts dataset export 76_5s_20260210_20260213 --output ~/data/eurusd.csv
+
 # Delete a dataset
-bun run src/cli/cli.ts dataset delete eurusd-5s
+bun run src/cli/cli.ts dataset delete 76_5s_20260210_20260213
 ```
 
 ### Backtesting

@@ -1,5 +1,28 @@
 # Changelog
 
+## 2026-02-14 (Auto-generated dataset names & CSV export)
+
+### Changed
+- `dataset create` no longer accepts `--name`. Names are auto-generated from parameters as `{activeId}_{size}s_{YYYYMMDD}_{YYYYMMDD}` (e.g. `76_5s_20260210_20260213`). Same params always produce the same name, preventing duplicate fetches.
+
+### Added
+- `iq dataset export <name>` command — exports dataset candles to CSV (`timestamp,open,high,low,close,volume`). Defaults to `./<name>.csv`, override with `--output <path>`.
+
+---
+
+## 2026-02-14 (CLI: Assets, Auth SSID & `iq` command)
+
+### Added
+- `iq assets list` command — browse available blitz-option assets (ID, name, payout, min/max bet, deadtime, expiries, status)
+- `iq assets list --all` — include disabled/suspended assets
+- `iq auth ssid` command — get SSID session token via profile (shows cached status)
+- `iq` global command via `bun link` — run `iq <command>` from anywhere instead of `bun run src/cli/cli.ts <command>`
+
+### Changed
+- `auth ssid` requires a profile (no .env fallback) — add a profile first with `iq auth add`
+
+---
+
 ## 2026-02-14 (CLI Migration)
 
 ### Changed
