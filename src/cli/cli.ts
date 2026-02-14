@@ -342,35 +342,23 @@ async function authDefault(name: string) {
 }
 
 async function authSsid(explicitProfile?: string) {
-  const { login } = await import("../client/auth.ts");
-
-  // Try profile first
   const profileName = await resolveProfile(explicitProfile);
-  if (profileName) {
-    try {
-      const profileRes = await apiFetch(`/api/auth/profiles/${encodeURIComponent(profileName)}/ssid`, "POST");
-      if (profileRes.ok) {
-        const data = await profileRes.json() as { ssid: string };
-        console.log(`  Profile: ${profileName}`);
-        console.log(`  SSID:    ${data.ssid}`);
-        return;
-      }
-    } catch {
-      // Fall through to .env
-    }
-  }
-
-  // Fallback to .env credentials
-  const email = process.env.IQ_EMAIL;
-  const password = process.env.IQ_PASSWORD;
-  if (!email || !password) {
-    console.error("No auth available. Add a profile or set IQ_EMAIL+IQ_PASSWORD env vars.");
+  if (!profileName) {
+    console.error("No profile found. Add one with: cli auth add --profile <name> --email <e> --password <p> --default");
     return;
   }
 
-  const result = await login(email, password);
-  console.log(`  Source:  ${profileName ? `profile "${profileName}"` : ".env credentials"}`);
-  console.log(`  SSID:    ${result.ssid}`);
+  const profileRes = await apiFetch(`/api/auth/profiles/${encodeURIComponent(profileName)}/ssid`, "POST");
+  if (!profileRes.ok) {
+    const err = await profileRes.json().catch(() => ({})) as Record<string, unknown>;
+    console.error(`Failed to get SSID for profile "${profileName}":`, err.error ?? "unknown error");
+    return;
+  }
+
+  const data = await profileRes.json() as { ssid: string; cached: boolean };
+  console.log(`  Profile: ${profileName}`);
+  console.log(`  SSID:    ${data.ssid}`);
+  console.log(`  Cached:  ${data.cached ? "yes" : "no (fresh login)"}`);
 }
 
 // ─── Agent handlers ───
