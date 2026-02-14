@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-02-14 (CLI: Assets & Auth SSID)
+
+### Added
+- `cli assets list` command — browse available blitz-option assets (ID, name, payout, min/max bet, deadtime, expiries, status)
+- `cli assets list --all` — include disabled/suspended assets
+- `cli auth ssid` command — get SSID session token via profile (shows cached status)
+
+### Changed
+- `auth ssid` requires a profile (no .env fallback) — add a profile first with `cli auth add`
+
+---
+
 ## 2026-02-14 (CLI Migration)
 
 ### Changed
