@@ -1,5 +1,6 @@
-import type { Position, BlitzOptionConfig, Candle } from "../types/index.ts";
+import type { Position, BlitzOptionConfig, Candle, Balance, Order } from "../types/index.ts";
 import type { AgentContext } from "./agent-context.ts";
+import type { TypedSensors } from "./sensor-types.ts";
 
 // Interface for candles data access — implemented by both live CandlesAPI and BacktestCandlesAPI
 export interface CandlesAPIInterface {
@@ -17,7 +18,7 @@ export interface Sensor {
   params: Record<string, unknown>;
 }
 
-export type SensorType = "candle" | "mood" | "position" | "order" | "balance";
+export type SensorType = "candle" | "mood" | "position" | "order" | "balance" | "instruments";
 
 // Actions the agent can take
 export interface Action {
@@ -26,6 +27,14 @@ export interface Action {
 }
 
 export type ActionType = "trade" | "subscribe" | "unsubscribe" | "query";
+
+// Result from executing an action
+export interface ActionResult {
+  actionIndex: number;
+  type: ActionType;
+  result?: unknown;
+  error?: string;
+}
 
 // Trade action payload
 export interface TradePayload {
@@ -40,13 +49,15 @@ export interface TradePayload {
 
 // Query action payload
 export interface QueryPayload {
-  method: "getPositions" | "getOrders" | "getHistory" | "getBalances" | "getAssets";
+  method: "getPositions" | "getOrders" | "getHistory" | "getBalances"
+        | "getAssets" | "getTradersMood" | "getCandles";
   params?: Record<string, unknown>;
 }
 
 // What the agent observes
 export interface Observation {
-  sensors: Map<string, unknown[]>;  // sensor_id → latest N values
+  sensors: Map<string, unknown[]>;  // sensor_id → latest N values (backward compat)
+  typed: TypedSensors;              // type-safe sensor accessor
   state: EnvironmentSnapshot;
   timestamp: number;
 }
@@ -59,6 +70,11 @@ export interface EnvironmentSnapshot {
   winCount: number;
   lossCount: number;
   totalPnl: number;
+  drawdown: number;
+  maxDrawdown: number;
+  peak: number;
+  streak: number;                    // +N consecutive wins, -N consecutive losses
+  recentClosedPositions: Position[]; // last 50 closed positions
   availableAssets: BlitzOptionConfig[];
   serverTime: number;
 }
@@ -82,7 +98,8 @@ export interface Agent {
 // Interface for TradingEnvironment (to avoid circular deps)
 export interface TradingEnvironmentInterface {
   getObservation(): Observation;
-  executeActions(actions: Action[]): Promise<void>;
+  executeActions(actions: Action[]): Promise<ActionResult[]>;
+  getRemainingTime(position: Position): number;
   getAvailableAssets(): BlitzOptionConfig[];
   getRules(): EnvironmentRules;
   getUserId(): number;

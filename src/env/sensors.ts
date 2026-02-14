@@ -1,4 +1,5 @@
 import type { CandlesAPI } from "../api/candles.ts";
+import type { AccountAPI } from "../api/account.ts";
 import type { CandlesAPIInterface } from "./types.ts";
 import type { TradingAPI } from "../api/trading.ts";
 import type { SubscriptionsAPI } from "../api/subscriptions.ts";
@@ -17,6 +18,7 @@ export class SensorManager {
     private candles: CandlesAPI,
     private trading: TradingAPI,
     private subscriptions: SubscriptionsAPI,
+    private account?: AccountAPI,
     maxBufferSize = 100,
   ) {
     this.maxBufferSize = maxBufferSize;
@@ -55,6 +57,20 @@ export class SensorManager {
         const userId = sensor.params.user_id as number;
         this.trading.subscribeOrders(userId, (order: Order) => {
           this.pushData(sensor.id, order);
+        });
+        break;
+      }
+      case "balance": {
+        if (this.account) {
+          this.account.subscribeBalanceChanged((data) => {
+            this.pushData(sensor.id, data.current_balance);
+          });
+        }
+        break;
+      }
+      case "instruments": {
+        this.subscriptions.subscribeInstrumentsList((data) => {
+          this.pushData(sensor.id, data);
         });
         break;
       }
@@ -190,6 +206,14 @@ export class SensorManager {
           });
           break;
         }
+        case "balance": {
+          this.subscriptions.subscribe("balance-changed", "1.0", {});
+          break;
+        }
+        case "instruments": {
+          this.subscriptions.subscribe("instruments-list", undefined, {});
+          break;
+        }
       }
     }
     console.log(`[Sensors] Resubscribed ${this.activeSensors.size} sensors`);
@@ -206,5 +230,13 @@ export class SensorManager {
 
   static positionId(balanceId: number): string {
     return `position:${balanceId}`;
+  }
+
+  static balanceId(): string {
+    return "balance:*";
+  }
+
+  static instrumentsId(): string {
+    return "instruments:*";
   }
 }

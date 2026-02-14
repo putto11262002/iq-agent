@@ -8,6 +8,12 @@ export class EnvironmentState {
   winCount: number = 0;
   lossCount: number = 0;
   totalPnl: number = 0;
+  drawdown: number = 0;
+  maxDrawdown: number = 0;
+  peak: number = 0;
+  streak: number = 0;
+  private recentClosed: Position[] = [];
+  private maxRecentClosed = 50;
   availableAssets: BlitzOptionConfig[] = [];
   serverTime: number = 0;
 
@@ -29,9 +35,20 @@ export class EnvironmentState {
 
       if (pos.close_reason === "win") {
         this.winCount++;
+        this.streak = this.streak > 0 ? this.streak + 1 : 1;
       } else {
         this.lossCount++;
+        this.streak = this.streak < 0 ? this.streak - 1 : -1;
       }
+
+      // Drawdown tracking
+      if (this.totalPnl > this.peak) this.peak = this.totalPnl;
+      this.drawdown = this.peak - this.totalPnl;
+      if (this.drawdown > this.maxDrawdown) this.maxDrawdown = this.drawdown;
+
+      // Recent closed ring buffer
+      this.recentClosed.push(pos);
+      if (this.recentClosed.length > this.maxRecentClosed) this.recentClosed.shift();
     }
   }
 
@@ -44,6 +61,11 @@ export class EnvironmentState {
       winCount: this.winCount,
       lossCount: this.lossCount,
       totalPnl: this.totalPnl,
+      drawdown: this.drawdown,
+      maxDrawdown: this.maxDrawdown,
+      peak: this.peak,
+      streak: this.streak,
+      recentClosedPositions: [...this.recentClosed],
       availableAssets: this.availableAssets,
       serverTime: this.serverTime,
     };

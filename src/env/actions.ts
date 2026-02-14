@@ -1,8 +1,9 @@
 import type { TradingAPI } from "../api/trading.ts";
 import type { AccountAPI } from "../api/account.ts";
 import type { AssetsAPI } from "../api/assets.ts";
+import type { SubscriptionsAPI } from "../api/subscriptions.ts";
 import type { SensorManager } from "./sensors.ts";
-import type { Action, TradePayload, QueryPayload, Sensor } from "./types.ts";
+import type { Action, TradePayload, QueryPayload, Sensor, CandlesAPIInterface } from "./types.ts";
 
 export class ActionExecutor {
   constructor(
@@ -10,6 +11,8 @@ export class ActionExecutor {
     private account: AccountAPI,
     private assets: AssetsAPI,
     private sensors: SensorManager,
+    private subscriptions: SubscriptionsAPI,
+    private candlesApi: CandlesAPIInterface,
   ) {}
 
   async execute(action: Action): Promise<unknown> {
@@ -58,6 +61,18 @@ export class ActionExecutor {
         return this.account.getBalances();
       case "getAssets":
         return this.assets.listBlitzOptions();
+      case "getTradersMood":
+        return this.subscriptions.getTradersMood(
+          payload.params?.activeId as number,
+          payload.params?.instrument as string | undefined,
+        );
+      case "getCandles":
+        return this.candlesApi.getCandles(
+          payload.params?.activeId as number,
+          payload.params?.size as number,
+          payload.params?.from as number,
+          payload.params?.to as number,
+        );
       default:
         throw new Error(`Unknown query method: ${payload.method}`);
     }

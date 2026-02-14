@@ -10,11 +10,13 @@ import type { Position, BlitzOptionConfig, BalanceChanged } from "../types/index
 import { authenticateWs } from "../client/auth.ts";
 import type {
   Action,
+  ActionResult,
   Observation,
   EnvironmentRules,
   TradingEnvironmentInterface,
   Agent,
 } from "./types.ts";
+import { TypedSensors } from "./sensor-types.ts";
 import type { AgentContext } from "./agent-context.ts";
 import type { EventBus } from "../events/bus.ts";
 import { SensorManager } from "./sensors.ts";
@@ -55,9 +57,9 @@ export class TradingEnvironment implements TradingEnvironmentInterface {
     this.trading = trading;
     this.subscriptions = subscriptions;
 
-    this.sensors = new SensorManager(candles, trading, subscriptions);
+    this.sensors = new SensorManager(candles, trading, subscriptions, account);
     this.state = new EnvironmentState();
-    this.actions = new ActionExecutor(trading, account, assets, this.sensors);
+    this.actions = new ActionExecutor(trading, account, assets, this.sensors, subscriptions, candles);
 
     this.rules = {
       minBet: 1,
@@ -67,15 +69,18 @@ export class TradingEnvironment implements TradingEnvironmentInterface {
     };
   }
 
-  async initialize(): Promise<void> {
+  async initialize(accountMode: "demo" | "real" = "demo"): Promise<void> {
     // Fetch profile
     const profile = await this.account.getProfile();
     this.userId = profile.user_id;
 
-    // Fetch demo balance
-    const balance = await this.account.getDemoBalance();
+    // Fetch balance by mode (demo or real)
+    const balance = await this.account.getBalanceByMode(accountMode);
     this.balanceId = balance.id;
     this.state.balance = balance.amount;
+
+    // Activate this balance on IQ's side
+    await this.account.changeBalance(this.balanceId);
 
     // Enable trade results
     this.account.setOptions({ sendResults: true });
@@ -178,27 +183,34 @@ export class TradingEnvironment implements TradingEnvironmentInterface {
       ? Math.floor(this.ws.serverTime / 1000)
       : Math.floor(Date.now() / 1000);
 
+    const raw = this.sensors.getAllData();
     return {
-      sensors: this.sensors.getAllData(),
+      sensors: raw,
+      typed: new TypedSensors(raw),
       state: this.state.snapshot(),
       timestamp: this.state.serverTime,
     };
   }
 
-  async executeActions(actions: Action[]): Promise<void> {
-    for (const action of actions) {
+  async executeActions(actions: Action[]): Promise<ActionResult[]> {
+    const results: ActionResult[] = [];
+    for (let i = 0; i < actions.length; i++) {
+      const action = actions[i]!;
       try {
-        await this.actions.execute(action);
+        const result = await this.actions.execute(action);
+        results.push({ actionIndex: i, type: action.type, result });
         if (this.eventBus) {
           this.eventBus.emit("action:executed", { actionType: action.type, payload: action.payload });
         }
       } catch (err) {
+        results.push({ actionIndex: i, type: action.type, error: (err as Error).message });
         console.error(`[Environment] Action ${action.type} failed:`, (err as Error).message);
         if (this.eventBus) {
           this.eventBus.emit("action:failed", { actionType: action.type, payload: action.payload, error: (err as Error).message });
         }
       }
     }
+    return results;
   }
 
   getAvailableAssets(): BlitzOptionConfig[] {
@@ -224,6 +236,13 @@ export class TradingEnvironment implements TradingEnvironmentInterface {
         }
       } catch (err) {
         console.error(`[Environment] Agent error:`, (err as Error).message);
+      }
+    });
+
+    // Wire onTradeResult — notify agent when positions close
+    this.trading.onPositionChanged((pos: Position) => {
+      if (pos.status === "closed") {
+        agent.onTradeResult(pos);
       }
     });
 

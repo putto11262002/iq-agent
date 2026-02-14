@@ -33,10 +33,12 @@ export class AssetsAPI {
   parseBlitzOptions(initData: Record<string, unknown>): BlitzOptionConfig[] {
     const configs: BlitzOptionConfig[] = [];
 
-    // The init data has turbo.actives (or binary.actives) with option configs
+    // The init data has blitz.actives, turbo.actives, and binary.actives
+    // Prefer blitz (has 30s/45s/60s+ expirations) over turbo (only 60s)
+    const blitz = initData.blitz as Record<string, unknown> | undefined;
     const turbo = initData.turbo as Record<string, unknown> | undefined;
     const binary = initData.binary as Record<string, unknown> | undefined;
-    const actives = (turbo?.actives || binary?.actives || initData.actives) as
+    const actives = (blitz?.actives || turbo?.actives || binary?.actives || initData.actives) as
       | Record<string, unknown>
       | undefined;
 
@@ -45,7 +47,8 @@ export class AssetsAPI {
     for (const [id, active] of Object.entries(actives)) {
       const a = active as Record<string, unknown>;
       const optionConfig = a.option as Record<string, unknown> | undefined;
-      const expirationTimes = (a.expiration_times || []) as number[];
+      const optExpTimes = (optionConfig?.expiration_times || []) as number[];
+      const expirationTimes = optExpTimes.length > 0 ? optExpTimes : (a.expiration_times || []) as number[];
       const deadtime = (a.deadtime || 0) as number;
 
       // Clean up the name — remove "front." prefix
@@ -67,6 +70,11 @@ export class AssetsAPI {
           ?.commission || 0) as number,
         is_enabled: isEnabled,
         is_suspended: isSuspended,
+        schedule: Array.isArray(a.schedule) ? a.schedule : undefined,
+        buyback_deadtime: typeof a.buyback_deadtime === "number" ? a.buyback_deadtime : undefined,
+        rollover_enabled: typeof a.rollover_enabled === "boolean" ? a.rollover_enabled : undefined,
+        precision: typeof a.precision === "number" ? a.precision : undefined,
+        group_id: typeof a.group_id === "number" ? a.group_id : undefined,
       };
 
       const parsed = BlitzOptionConfigSchema.safeParse(raw);

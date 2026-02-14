@@ -15,6 +15,8 @@ import type { Agent } from "../../env/types.ts";
 import type { Position } from "../../types/index.ts";
 
 export interface RunnerConfig {
+  profile?: string;
+  accountMode?: "demo" | "real";
   ssid?: string;
   credentials?: { email: string; password: string };
   agent: Agent;
@@ -69,6 +71,8 @@ export class AgentRunner {
         startBalance: this.cfg.wallet.initialBalance,
         startedAt: Math.floor(Date.now() / 1000),
         status: "running",
+        profileName: this.cfg.profile ?? null,
+        accountMode: this.cfg.accountMode ?? "demo",
       });
       console.log(`[Runner] Registered run: ${this.runId}`);
     } catch (err) {
@@ -90,15 +94,32 @@ export class AgentRunner {
       config: this.cfg.agentConfig,
     });
 
-    // 4. Boot WS → auth → env
-    let ssid = this.cfg.ssid || "";
-    if (!ssid) {
-      const creds = this.cfg.credentials;
-      if (!creds) {
-        throw new Error("No ssid or credentials provided");
+    // 4. Boot WS → auth → env (fallback chain: profile → ssid → credentials → env)
+    let ssid = "";
+    if (this.cfg.profile) {
+      // Resolve SSID via server-managed auth profile
+      try {
+        const profileRes = await apiFetch(`/api/auth/profiles/${encodeURIComponent(this.cfg.profile)}/ssid`, "POST");
+        if (!profileRes.ok) {
+          const err = await profileRes.json() as { error?: string };
+          throw new Error(err.error || `Profile "${this.cfg.profile}" SSID fetch failed`);
+        }
+        const data = await profileRes.json() as { ssid: string; cached: boolean };
+        ssid = data.ssid;
+        console.log(`[Runner] Auth via profile "${this.cfg.profile}" (cached=${data.cached})`);
+      } catch (err) {
+        throw new Error(`Profile auth failed: ${(err as Error).message}`);
       }
-      const result = await login(creds.email, creds.password);
+    } else if (this.cfg.ssid) {
+      ssid = this.cfg.ssid;
+    } else if (this.cfg.credentials) {
+      const result = await login(this.cfg.credentials.email, this.cfg.credentials.password);
       ssid = result.ssid;
+    } else if (process.env.IQ_EMAIL && process.env.IQ_PASSWORD) {
+      const result = await login(process.env.IQ_EMAIL, process.env.IQ_PASSWORD);
+      ssid = result.ssid;
+    } else {
+      throw new Error("No auth method available: provide --profile, ssid, credentials, or IQ_EMAIL+IQ_PASSWORD env vars");
     }
 
     this.ws = new IQWebSocket();
@@ -115,7 +136,7 @@ export class AgentRunner {
     const env = new TradingEnvironment(protocol, this.ws, account, assets, candles, trading, subscriptions);
     env.setSsid(ssid);
     env.setEventBus(this.eventBus);
-    await env.initialize();
+    await env.initialize(this.cfg.accountMode ?? "demo");
 
     this.running = true;
 
@@ -126,10 +147,10 @@ export class AgentRunner {
     });
 
     // 6. Subscribe to position changes directly — no monkey-patching
+    //    Note: agent.onTradeResult is now called by the environment in runAgent()
     trading.onPositionChanged((pos: Position) => {
       if (pos.status === "closed") {
         this.handleTradeResult(pos);
-        this.cfg.agent.onTradeResult(pos);
       }
     });
 

@@ -12,6 +12,11 @@ export const BlitzOptionConfigSchema = z.object({
   profit_commission: z.number(),
   is_enabled: z.boolean(),
   is_suspended: z.boolean(),
+  schedule: z.array(z.unknown()).optional(),
+  buyback_deadtime: z.number().optional(),
+  rollover_enabled: z.boolean().optional(),
+  precision: z.number().optional(),
+  group_id: z.number().optional(),
 });
 
 /** Detailed information about a trading active/instrument */

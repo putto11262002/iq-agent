@@ -1,6 +1,7 @@
 import type { Candle, Position, BlitzOptionConfig } from "../types/index.ts";
 import type {
   Action,
+  ActionResult,
   Observation,
   EnvironmentRules,
   TradingEnvironmentInterface,
@@ -10,6 +11,7 @@ import type {
   QueryPayload,
   CandlesAPIInterface,
 } from "../env/types.ts";
+import { TypedSensors } from "../env/sensor-types.ts";
 import type { AgentContext } from "../env/agent-context.ts";
 import type { EventBus } from "../events/bus.ts";
 import type { Wallet } from "../bot/infra/wallet.ts";
@@ -94,27 +96,34 @@ export class BacktestEnvironment implements TradingEnvironmentInterface {
   // ─── TradingEnvironmentInterface ───
 
   getObservation(): Observation {
+    const raw = new Map(this.sensorBuffers);
     return {
-      sensors: new Map(this.sensorBuffers),
+      sensors: raw,
+      typed: new TypedSensors(raw),
       state: this.state.snapshot(),
       timestamp: this.currentTime,
     };
   }
 
-  async executeActions(actions: Action[]): Promise<void> {
-    for (const action of actions) {
+  async executeActions(actions: Action[]): Promise<ActionResult[]> {
+    const results: ActionResult[] = [];
+    for (let i = 0; i < actions.length; i++) {
+      const action = actions[i]!;
       try {
-        await this.executeAction(action);
+        const result = await this.executeAction(action);
+        results.push({ actionIndex: i, type: action.type, result });
         if (this.eventBus) {
           this.eventBus.emit("action:executed", { actionType: action.type, payload: action.payload });
         }
       } catch (err) {
+        results.push({ actionIndex: i, type: action.type, error: (err as Error).message });
         console.error(`[BacktestEnv] Action ${action.type} failed:`, (err as Error).message);
         if (this.eventBus) {
           this.eventBus.emit("action:failed", { actionType: action.type, payload: action.payload, error: (err as Error).message });
         }
       }
     }
+    return results;
   }
 
   getAvailableAssets(): BlitzOptionConfig[] {
@@ -143,23 +152,30 @@ export class BacktestEnvironment implements TradingEnvironmentInterface {
     }
   }
 
+  getRemainingTime(position: Position): number {
+    if (!position.expiration_time) return 0;
+    return Math.max(0, position.expiration_time - this.currentTime);
+  }
+
   getCandlesAPI(): CandlesAPIInterface {
     return this.candlesApi;
   }
 
   // ─── Action execution ───
 
-  private async executeAction(action: Action): Promise<void> {
+  private async executeAction(action: Action): Promise<unknown> {
     switch (action.type) {
       case "trade":
-        return this.executeTrade(action.payload as unknown as TradePayload);
+        this.executeTrade(action.payload as unknown as TradePayload);
+        return undefined;
       case "subscribe":
-        return this.executeSubscribe(action.payload as unknown as Sensor);
+        this.executeSubscribe(action.payload as unknown as Sensor);
+        return undefined;
       case "unsubscribe":
-        return this.executeUnsubscribe(action.payload.sensorId as string);
+        this.executeUnsubscribe(action.payload.sensorId as string);
+        return undefined;
       case "query":
-        this.executeQuery(action.payload as unknown as QueryPayload);
-        return;
+        return this.executeQuery(action.payload as unknown as QueryPayload);
     }
   }
 
@@ -248,9 +264,28 @@ export class BacktestEnvironment implements TradingEnvironmentInterface {
     this.sensorBuffers.delete(sensorId);
   }
 
-  private executeQuery(payload: QueryPayload): void {
-    // Note: query return values are not propagated in either live or backtest
-    // (both executeActions discard return values). This is a known design limitation.
+  private executeQuery(payload: QueryPayload): unknown {
+    switch (payload.method) {
+      case "getPositions":
+        return this.state.openPositions;
+      case "getHistory":
+        return this.state.snapshot().recentClosedPositions;
+      case "getBalances":
+        return [{ id: 0, amount: this.state.balance, currency: "USD" }];
+      case "getAssets":
+        return this.state.availableAssets;
+      case "getTradersMood":
+        return 0.5; // Placeholder — no mood data in backtest
+      case "getCandles":
+        return this.candlesApi.getCandles(
+          payload.params?.activeId as number,
+          payload.params?.size as number,
+          payload.params?.from as number,
+          payload.params?.to as number,
+        );
+      default:
+        return undefined;
+    }
   }
 
   // ─── Runner-facing methods ───
