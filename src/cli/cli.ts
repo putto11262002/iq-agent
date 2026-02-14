@@ -679,6 +679,85 @@ async function datasetDelete(name: string) {
   console.log(`Dataset "${name}" deleted.`);
 }
 
+// ─── Assets handler ───
+
+async function assetsList(explicitProfile?: string, showAll = false) {
+  const { IQWebSocket } = await import("../client/ws.ts");
+  const { Protocol } = await import("../client/protocol.ts");
+  const { login, authenticateWs } = await import("../client/auth.ts");
+  const { AssetsAPI } = await import("../api/assets.ts");
+
+  // Auth resolution: profile > .env
+  let ssid = "";
+  const profileName = await resolveProfile(explicitProfile);
+  if (profileName) {
+    try {
+      const profileRes = await apiFetch(`/api/auth/profiles/${encodeURIComponent(profileName)}/ssid`, "POST");
+      if (profileRes.ok) {
+        const data = await profileRes.json() as { ssid: string };
+        ssid = data.ssid;
+      }
+    } catch {
+      // Fall through to .env
+    }
+  }
+
+  if (!ssid) {
+    ssid = process.env.IQ_SSID || "";
+    if (!ssid) {
+      const email = process.env.IQ_EMAIL!;
+      const password = process.env.IQ_PASSWORD!;
+      if (!email || !password) {
+        console.error("No auth available. Add a profile or set IQ_EMAIL+IQ_PASSWORD env vars.");
+        return;
+      }
+      console.log("  Logging in...");
+      const result = await login(email, password);
+      ssid = result.ssid;
+    }
+  }
+
+  const ws = new IQWebSocket();
+  await ws.connect();
+  const protocol = new Protocol(ws);
+  await authenticateWs(protocol, ssid);
+
+  const assetsApi = new AssetsAPI(protocol);
+  const initData = await assetsApi.getInitializationData();
+  const allConfigs = assetsApi.parseBlitzOptions(initData);
+  const configs = showAll ? allConfigs : allConfigs.filter((c) => c.is_enabled && !c.is_suspended);
+
+  if (configs.length === 0) {
+    console.log("No assets found.");
+    ws.close();
+    return;
+  }
+
+  console.log(
+    `\n  ${pad("ID", 6)} | ${pad("Name", 20)} | ${pad("Payout", 8)} | ${pad("Min Bet", 8)} | ${pad("Max Bet", 10)} | ${pad("Deadtime", 9)} | ${pad("Expiries", 24)} | Status`,
+  );
+  console.log("  " + "-".repeat(110));
+
+  for (const c of configs) {
+    const payout = c.profit_commission > 0 ? `${(100 - c.profit_commission).toFixed(0)}%` : "-";
+    const expiries = c.expiration_times.map((t) => (t >= 60 ? `${t / 60}m` : `${t}s`)).join(", ");
+    const status = !c.is_enabled
+      ? colors.red("disabled")
+      : c.is_suspended
+        ? colors.yellow("suspended")
+        : colors.green("active");
+
+    console.log(
+      `  ${pad(String(c.active_id), 6)} | ${pad(c.name, 20)} | ${pad(payout, 8)} | $${pad(String(c.minimal_bet), 7)} | $${pad(String(c.maximal_bet), 9)} | ${pad(c.deadtime + "s", 9)} | ${pad(expiries, 24)} | ${status}`,
+    );
+  }
+
+  console.log(`\n  Total: ${configs.length} assets${showAll ? "" : " (active only, use --all to include disabled/suspended)"}\n`);
+
+  ws.close();
+  process.exit(0);
+}
+
 // ─── Backtest handler ───
 
 async function backtestRun(
@@ -1013,6 +1092,25 @@ yargs(hideBin(process.argv))
           },
         )
         .demandCommand(1, "Please specify a dataset subcommand."),
+    () => {},
+  )
+  .command(
+    "assets",
+    "Browse available trading assets",
+    (yargs) =>
+      yargs
+        .command(
+          "list",
+          "List available blitz-option assets",
+          (yargs) =>
+            yargs
+              .option("profile", { type: "string", describe: "Auth profile name" })
+              .option("all", { type: "boolean", default: false, describe: "Include disabled/suspended assets" }),
+          async (argv) => {
+            await assetsList(argv.profile, argv.all);
+          },
+        )
+        .demandCommand(1, "Please specify an assets subcommand."),
     () => {},
   )
   .command(
