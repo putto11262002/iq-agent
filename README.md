@@ -53,7 +53,34 @@ All types are derived from Zod schemas via `z.infer<>`. Schemas live in `src/sch
 
 ## CLI
 
-All commands go through `bun run src/cli/cli.ts <command>`.
+All commands go through `bun run src/cli/cli.ts <command>`. Every command and subcommand supports `--help` for usage info.
+
+```bash
+# See all commands
+bun run src/cli/cli.ts --help
+
+# See subcommands for a group
+bun run src/cli/cli.ts agents --help
+
+# See options for a specific command
+bun run src/cli/cli.ts agents run --help
+```
+
+### Config Overrides
+
+The `--config` flag accepts `key=value` pairs with automatic type coercion:
+
+| Value | Coerced To |
+|---|---|
+| `true` / `false` | boolean |
+| `null` | null |
+| `42`, `0.5` | number |
+| `{"a":1}`, `[1,2]` | parsed JSON |
+| anything else | string |
+
+```bash
+bun run src/cli/cli.ts backtest macd --dataset x --config debug=false threshold=0.5 tradeAmount=10
+```
 
 ### Live Trading
 

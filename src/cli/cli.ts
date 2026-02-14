@@ -1,6 +1,8 @@
+import yargs from "yargs";
+import { hideBin } from "yargs/helpers";
 import { api, apiFetch } from "./api.ts";
 
-const [command, ...args] = process.argv.slice(2);
+// ─── Helpers ───
 
 function pad(s: string, n: number) {
   return s.length >= n ? s : s + " ".repeat(n - s.length);
@@ -16,7 +18,6 @@ function fmtTime(ts: number): string {
   return new Date(ts * 1000).toLocaleString();
 }
 
-// Color helpers for terminal output
 const colors = {
   red: (s: string) => `\x1b[31m${s}\x1b[0m`,
   green: (s: string) => `\x1b[32m${s}\x1b[0m`,
@@ -40,10 +41,48 @@ function colorForEventType(type: string): (s: string) => string {
   return (s: string) => s;
 }
 
-// ─── Existing Commands ───
+// ─── Config coercion ───
 
-async function list() {
-  const status = args[0] as "running" | "stopped" | undefined;
+function parseConfigValue(val: string): unknown {
+  if (val === "true") return true;
+  if (val === "false") return false;
+  if (val === "null") return null;
+  if (val !== "" && !isNaN(Number(val))) return Number(val);
+  if ((val.startsWith("{") && val.endsWith("}")) || (val.startsWith("[") && val.endsWith("]"))) {
+    try { return JSON.parse(val); } catch { return val; }
+  }
+  return val;
+}
+
+function coerceConfig(arr: string[]): Record<string, unknown> {
+  const obj: Record<string, unknown> = {};
+  for (const kv of arr) {
+    const eq = kv.indexOf("=");
+    if (eq > 0) obj[kv.slice(0, eq)] = parseConfigValue(kv.slice(eq + 1));
+  }
+  return obj;
+}
+
+// ─── Shared: resolve auth profile ───
+
+async function resolveProfile(explicitProfile?: string): Promise<string | null> {
+  if (explicitProfile) return explicitProfile;
+  try {
+    const res = await apiFetch("/api/auth/profiles", "GET");
+    if (res.ok) {
+      const profiles = await res.json() as { name: string; isDefault: boolean }[];
+      const def = profiles.find((p) => p.isDefault);
+      if (def) return def.name;
+    }
+  } catch {
+    // Server not running — fall through to .env
+  }
+  return null;
+}
+
+// ─── Command handlers ───
+
+async function list(status?: string) {
   const query: Record<string, string> = {};
   if (status) query.status = status;
 
@@ -69,10 +108,6 @@ async function list() {
 }
 
 async function stats(runId: string) {
-  if (!runId) {
-    console.error("Usage: cli stats <runId>");
-    return;
-  }
   const res = await api.api.runs[":id"].stats.$get({ param: { id: runId } });
   if (res.status === 404) {
     console.error(`Run "${runId}" not found.`);
@@ -92,7 +127,7 @@ async function stats(runId: string) {
   console.log();
 }
 
-async function compare(...ids: string[]) {
+async function compare(ids: string[]) {
   if (ids.length < 2) {
     console.error("Usage: cli compare <id1> <id2> [id3...]");
     return;
@@ -120,10 +155,6 @@ async function compare(...ids: string[]) {
 }
 
 async function listTrades(runId: string) {
-  if (!runId) {
-    console.error("Usage: cli trades <runId>");
-    return;
-  }
   const res = await api.api.trades.$get({ query: { runId } });
   const rows = await res.json();
 
@@ -145,8 +176,7 @@ async function listTrades(runId: string) {
   console.log(`\n  Total: ${rows.length} trades\n`);
 }
 
-async function leaderboard() {
-  const sort = args[0] || "pnl";
+async function leaderboard(sort: string) {
   const res = await api.api.stats.leaderboard.$get({ query: { sort } });
   const rows = await res.json() as Record<string, unknown>[];
 
@@ -169,10 +199,6 @@ async function leaderboard() {
 }
 
 async function stopRun(runId: string) {
-  if (!runId) {
-    console.error("Usage: cli stop <runId>");
-    return;
-  }
   const res = await apiFetch(`/api/runs/${runId}`, "PATCH", {
     status: "stopped",
     stoppedAt: Math.floor(Date.now() / 1000),
@@ -185,20 +211,8 @@ async function stopRun(runId: string) {
   }
 }
 
-// ─── Events Commands ───
-
-async function listEvents(runId: string) {
-  if (!runId) {
-    console.error("Usage: cli events <runId> [--type <eventType>]");
-    return;
-  }
-
-  const typeIdx = args.indexOf("--type");
-  const type = typeIdx >= 0 ? args[typeIdx + 1] : undefined;
-  const limitIdx = args.indexOf("--limit");
-  const limit = limitIdx >= 0 ? args[limitIdx + 1] : "100";
-
-  const params = new URLSearchParams({ runId, limit: limit! });
+async function listEvents(runId: string, type?: string, limit: number = 100) {
+  const params = new URLSearchParams({ runId, limit: String(limit) });
   if (type) params.set("type", type);
 
   const res = await apiFetch(`/api/events?${params}`, "GET");
@@ -217,7 +231,6 @@ async function listEvents(runId: string) {
     `\n  ${pad("Time", 20)} | ${pad("Type", 20)} | Payload`
   );
   console.log("  " + "-".repeat(80));
-  // Reverse to show oldest first
   for (const e of [...rows].reverse()) {
     const time = fmtTime(e.timestamp as number);
     const payload = JSON.stringify(e.payload ?? {});
@@ -230,11 +243,6 @@ async function listEvents(runId: string) {
 }
 
 async function replayEvents(runId: string) {
-  if (!runId) {
-    console.error("Usage: cli replay <runId>");
-    return;
-  }
-
   const res = await apiFetch(`/api/events?runId=${encodeURIComponent(runId)}&limit=1000`, "GET");
   if (!res.ok) {
     console.error("Failed to fetch events.");
@@ -247,7 +255,6 @@ async function replayEvents(runId: string) {
     return;
   }
 
-  // Sort oldest first
   const sorted = [...rows].sort((a, b) => (a.timestamp as number) - (b.timestamp as number));
   const startTs = sorted[0]!.timestamp as number;
 
@@ -270,7 +277,71 @@ async function replayEvents(runId: string) {
   console.log(`\n  ${sorted.length} events over ${fmtDuration((sorted[sorted.length - 1]!.timestamp as number) - startTs)}\n`);
 }
 
-// ─── Agent Management Commands ───
+// ─── Auth handlers ───
+
+async function authList() {
+  const res = await apiFetch("/api/auth/profiles", "GET");
+  if (!res.ok) {
+    console.error("Failed to fetch profiles. Is the server running?");
+    return;
+  }
+
+  const rows = await res.json() as { name: string; email: string; isDefault: boolean; createdAt: number; lastUsedAt: number | null }[];
+  if (!Array.isArray(rows) || rows.length === 0) {
+    console.log("No auth profiles found.");
+    return;
+  }
+
+  console.log(
+    `\n  ${pad("Name", 20)} | ${pad("Email", 30)} | ${pad("Default", 8)} | Last Used`
+  );
+  console.log("  " + "-".repeat(85));
+  for (const p of rows) {
+    const lastUsed = p.lastUsedAt ? fmtTime(p.lastUsedAt) : "never";
+    const def = p.isDefault ? colors.green("yes") : "no";
+    console.log(
+      `  ${pad(p.name, 20)} | ${pad(p.email, 30)} | ${pad(def, 8)} | ${lastUsed}`
+    );
+  }
+  console.log(`\n  Total: ${rows.length} profiles\n`);
+}
+
+async function authAdd(profile: string, email: string, password: string, isDefault: boolean) {
+  const res = await apiFetch("/api/auth/profiles", "POST", {
+    name: profile,
+    email,
+    password,
+    isDefault,
+  });
+
+  if (res.ok) {
+    console.log(`Profile "${profile}" added.${isDefault ? " (set as default)" : ""}`);
+  } else {
+    const err = await res.json() as Record<string, unknown>;
+    console.error("Failed to add profile:", err);
+  }
+}
+
+async function authRemove(name: string) {
+  const res = await apiFetch(`/api/auth/profiles/${encodeURIComponent(name)}`, "DELETE");
+  if (res.ok) {
+    console.log(`Profile "${name}" removed.`);
+  } else {
+    console.error("Failed to remove profile.");
+  }
+}
+
+async function authDefault(name: string) {
+  const res = await apiFetch(`/api/auth/profiles/${encodeURIComponent(name)}/default`, "PATCH");
+  if (res.ok) {
+    console.log(`Profile "${name}" set as default.`);
+  } else {
+    const err = await res.json() as Record<string, unknown>;
+    console.error("Failed to set default:", err);
+  }
+}
+
+// ─── Agent handlers ───
 
 async function agentsList() {
   const res = await apiFetch("/api/agents", "GET");
@@ -297,23 +368,7 @@ async function agentsList() {
   console.log(`\n  Total: ${rows.length} agents\n`);
 }
 
-async function agentsAdd() {
-  let name = "";
-  let path = "";
-  let description = "";
-
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--name" && args[i + 1]) { name = args[++i]!; continue; }
-    if (args[i] === "--path" && args[i + 1]) { path = args[++i]!; continue; }
-    if (args[i] === "--description" && args[i + 1]) { description = args[++i]!; continue; }
-  }
-
-  if (!name || !path) {
-    console.error("Usage: cli agents add --name <name> --path <./path/to/agent.ts> [--description '...']");
-    return;
-  }
-
-  // Resolve to absolute path
+async function agentsAdd(name: string, path: string, description?: string) {
   const absolutePath = path.startsWith("/") ? path : `${process.cwd()}/${path}`;
 
   const res = await apiFetch("/api/agents", "POST", {
@@ -331,10 +386,6 @@ async function agentsAdd() {
 }
 
 async function agentsRemove(name: string) {
-  if (!name) {
-    console.error("Usage: cli agents remove <name>");
-    return;
-  }
   const res = await apiFetch(`/api/agents/${encodeURIComponent(name)}`, "DELETE");
   if (res.ok) {
     console.log(`Agent "${name}" removed.`);
@@ -343,34 +394,44 @@ async function agentsRemove(name: string) {
   }
 }
 
-async function agentsRun(name: string) {
-  if (!name) {
-    console.error("Usage: cli agents run <name> [--active <id>] [--balance <amount>] [--config key=value ...]");
-    return;
-  }
+async function agentsRun(
+  name: string,
+  activeId: number,
+  balance: number,
+  durationSeconds: number | undefined,
+  explicitProfile: string | undefined,
+  realMode: boolean,
+  configOverrides: Record<string, unknown>,
+) {
+  // Safety rail for real mode
+  if (realMode) {
+    const profileLabel = explicitProfile ?? "default";
+    console.log(`\n  ${colors.red(colors.bold("⚠ WARNING: REAL MONEY MODE ⚠"))}`);
+    console.log(`  Agent: ${name} | Profile: ${profileLabel}`);
+    process.stdout.write('  Type "CONFIRM" to proceed: ');
 
-  // Parse CLI flags
-  let activeId = 76;
-  let balance = 100;
-  const configOverrides: Record<string, unknown> = {};
+    const reader = (await import("readline")).createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
 
-  for (let i = 1; i < args.length; i++) {
-    if (args[i] === "--active" && args[i + 1]) { activeId = Number(args[++i]); continue; }
-    if (args[i] === "--balance" && args[i + 1]) { balance = Number(args[++i]); continue; }
-    if (args[i] === "--config" && args[i + 1]) {
-      // Parse key=value pairs
-      while (args[i + 1] && !args[i + 1]!.startsWith("--")) {
-        const kv = args[++i]!;
-        const eqIdx = kv.indexOf("=");
-        if (eqIdx > 0) {
-          const key = kv.slice(0, eqIdx);
-          const val = kv.slice(eqIdx + 1);
-          configOverrides[key] = isNaN(Number(val)) ? val : Number(val);
-        }
-      }
-      continue;
+    const confirmed = await new Promise<boolean>((resolve) => {
+      reader.on("line", (line: string) => {
+        reader.close();
+        resolve(line.trim() === "CONFIRM");
+      });
+    });
+
+    if (!confirmed) {
+      console.log("  Aborted.");
+      process.exit(0);
     }
+    console.log();
   }
+
+  const accountMode: "demo" | "real" = realMode ? "real" : "demo";
+
+  const profileName = await resolveProfile(explicitProfile);
 
   // 1. Fetch agent registration
   const agentRes = await apiFetch(`/api/agents/${encodeURIComponent(name)}`, "GET");
@@ -403,78 +464,51 @@ async function agentsRun(name: string) {
   };
 
   const agent = createAgent(mergedConfig);
-  console.log(`=== Dynamic Agent: ${agent.name} ===\n`);
+  console.log(`=== Dynamic Agent: ${agent.name} ===`);
+  console.log(`  Mode: ${accountMode}${profileName ? ` | Profile: ${profileName}` : " | Auth: .env fallback"}\n`);
 
   // 4. Create Runner
   const { AgentRunner } = await import("../bot/infra/runner.ts");
 
-  const runner = new AgentRunner({
-    credentials: {
-      email: process.env.IQ_EMAIL!,
-      password: process.env.IQ_PASSWORD!,
-    },
-    ssid: process.env.IQ_SSID,
+  const runnerCfg: import("../bot/infra/runner.ts").RunnerConfig = {
     agent,
     agentId: name,
     agentType: name,
     agentConfig: mergedConfig,
+    accountMode,
     wallet: {
       mode: (process.env.WALLET_MODE as "virtual" | "real") || "virtual",
       initialBalance: balance,
     },
-  });
+    maxDuration: durationSeconds,
+  };
+
+  if (profileName) {
+    runnerCfg.profile = profileName;
+  } else {
+    runnerCfg.credentials = {
+      email: process.env.IQ_EMAIL!,
+      password: process.env.IQ_PASSWORD!,
+    };
+    runnerCfg.ssid = process.env.IQ_SSID;
+  }
+
+  const runner = new AgentRunner(runnerCfg);
 
   console.log(`Asset ID: ${activeId} | Run ID: ${runner.getRunId()}`);
   await runner.start();
 }
 
-// ─── Agent subcommand dispatcher ───
+// ─── Dataset handlers ───
 
-async function agentsCommand() {
-  const sub = args[0];
-  const subArgs = args.slice(1);
-
-  switch (sub) {
-    case "list":
-      return agentsList();
-    case "add":
-      // args already has the flags after "agents"
-      return agentsAdd();
-    case "remove":
-      return agentsRemove(subArgs[0]!);
-    case "run":
-      return agentsRun(subArgs[0]!);
-    default:
-      console.log("Usage: cli agents <list|add|remove|run> [args]");
-      console.log("\n  list                              List registered agents");
-      console.log("  add --name <n> --path <p> [--description '...']  Register an agent");
-      console.log("  remove <name>                     Unregister an agent");
-      console.log("  run <name> [--active 76] [--balance 100] [--config k=v ...]  Run an agent");
-  }
-}
-
-// ─── Dataset Commands ───
-
-async function datasetCreate() {
-  let name = "";
-  let activeId = 0;
-  let candleSize = 0;
-  let fromDate = "";
-  let toDate = "";
-
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--name" && args[i + 1]) { name = args[++i]!; continue; }
-    if (args[i] === "--active" && args[i + 1]) { activeId = Number(args[++i]); continue; }
-    if (args[i] === "--candle-size" && args[i + 1]) { candleSize = Number(args[++i]); continue; }
-    if (args[i] === "--from" && args[i + 1]) { fromDate = args[++i]!; continue; }
-    if (args[i] === "--to" && args[i + 1]) { toDate = args[++i]!; continue; }
-  }
-
-  if (!name || !activeId || !candleSize || !fromDate || !toDate) {
-    console.error("Usage: cli dataset create --name <n> --active <id> --candle-size <s> --from <date> --to <date>");
-    return;
-  }
-
+async function datasetCreate(
+  name: string,
+  activeId: number,
+  candleSize: number,
+  fromDate: string,
+  toDate: string,
+  explicitProfile?: string,
+) {
   const fromTs = Math.floor(new Date(fromDate).getTime() / 1000);
   const toTs = Math.floor(new Date(toDate).getTime() / 1000);
 
@@ -485,24 +519,40 @@ async function datasetCreate() {
 
   console.log(`\n  Creating dataset "${name}": active=${activeId}, size=${candleSize}s, ${fromDate} → ${toDate}`);
 
-  // Connect to IQ Option to fetch candles + asset config
   const { IQWebSocket } = await import("../client/ws.ts");
   const { Protocol } = await import("../client/protocol.ts");
   const { login, authenticateWs } = await import("../client/auth.ts");
   const { CandlesAPI } = await import("../api/candles.ts");
   const { AssetsAPI } = await import("../api/assets.ts");
 
-  let ssid = process.env.IQ_SSID || "";
-  if (!ssid) {
-    const email = process.env.IQ_EMAIL!;
-    const password = process.env.IQ_PASSWORD!;
-    if (!email || !password) {
-      console.error("Set IQ_SSID or IQ_EMAIL+IQ_PASSWORD environment variables.");
-      return;
+  let ssid = "";
+  const profileName = await resolveProfile(explicitProfile);
+  if (profileName) {
+    try {
+      const profileRes = await apiFetch(`/api/auth/profiles/${encodeURIComponent(profileName)}/ssid`, "POST");
+      if (profileRes.ok) {
+        const data = await profileRes.json() as { ssid: string };
+        ssid = data.ssid;
+        console.log(`  Auth via profile "${profileName}"`);
+      }
+    } catch {
+      // Fall through to .env
     }
-    console.log("  Logging in...");
-    const result = await login(email, password);
-    ssid = result.ssid;
+  }
+
+  if (!ssid) {
+    ssid = process.env.IQ_SSID || "";
+    if (!ssid) {
+      const email = process.env.IQ_EMAIL!;
+      const password = process.env.IQ_PASSWORD!;
+      if (!email || !password) {
+        console.error("No auth available. Add a profile or set IQ_EMAIL+IQ_PASSWORD env vars.");
+        return;
+      }
+      console.log("  Logging in...");
+      const result = await login(email, password);
+      ssid = result.ssid;
+    }
   }
 
   const ws = new IQWebSocket();
@@ -511,7 +561,6 @@ async function datasetCreate() {
   await authenticateWs(protocol, ssid);
   console.log("  Connected to IQ Option.");
 
-  // Fetch asset config
   const assetsApi = new AssetsAPI(protocol);
   let assetConfig: Record<string, unknown> | null = null;
   try {
@@ -523,10 +572,9 @@ async function datasetCreate() {
     console.warn("  Could not fetch asset config (will use defaults).");
   }
 
-  // Fetch candles in chunks (IQ API limits per request)
   const candlesApi = new CandlesAPI(protocol, ws);
   const allCandles: Record<string, unknown>[] = [];
-  const chunkSize = 1000 * candleSize; // 1000 candles per chunk
+  const chunkSize = 1000 * candleSize;
 
   let cursor = fromTs;
   while (cursor < toTs) {
@@ -543,7 +591,6 @@ async function datasetCreate() {
     }
 
     cursor = chunkEnd;
-    // Small delay to avoid rate limiting
     await new Promise((r) => setTimeout(r, 200));
   }
 
@@ -555,16 +602,13 @@ async function datasetCreate() {
     return;
   }
 
-  // Store in SQLite
   const { db } = await import("../server/db/index.ts");
   const { datasets, datasetCandles } = await import("../server/db/schema.ts");
 
-  // Delete existing dataset with same name (if any)
   const { eq } = await import("drizzle-orm");
   await db.delete(datasetCandles).where(eq(datasetCandles.dataset, name));
   await db.delete(datasets).where(eq(datasets.name, name));
 
-  // Insert dataset metadata
   await db.insert(datasets).values({
     name,
     activeId,
@@ -576,7 +620,6 @@ async function datasetCreate() {
     createdAt: Math.floor(Date.now() / 1000),
   });
 
-  // Insert candles in batches
   const batchSize = 500;
   for (let i = 0; i < allCandles.length; i += batchSize) {
     const batch = allCandles.slice(i, i + batchSize);
@@ -627,75 +670,24 @@ async function datasetList() {
 }
 
 async function datasetDelete(name: string) {
-  if (!name) {
-    console.error("Usage: cli dataset delete <name>");
-    return;
-  }
-
   const { db } = await import("../server/db/index.ts");
   const { datasets, datasetCandles } = await import("../server/db/schema.ts");
   const { eq } = await import("drizzle-orm");
 
   await db.delete(datasetCandles).where(eq(datasetCandles.dataset, name));
-  const result = await db.delete(datasets).where(eq(datasets.name, name));
+  await db.delete(datasets).where(eq(datasets.name, name));
   console.log(`Dataset "${name}" deleted.`);
 }
 
-async function datasetCommand() {
-  const sub = args[0];
-  const subArgs = args.slice(1);
+// ─── Backtest handler ───
 
-  switch (sub) {
-    case "create":
-      return datasetCreate();
-    case "list":
-      return datasetList();
-    case "delete":
-      return datasetDelete(subArgs[0]!);
-    default:
-      console.log("Usage: cli dataset <create|list|delete> [args]");
-      console.log("\n  create --name <n> --active <id> --candle-size <s> --from <date> --to <date>");
-      console.log("  list                              List all datasets");
-      console.log("  delete <name>                     Delete a dataset");
-  }
-}
-
-// ─── Backtest Command ───
-
-async function backtestRun(agentName: string) {
-  if (!agentName) {
-    console.error("Usage: cli backtest <agentName> --dataset <name>[,name2] --balance <n> [--payout <n>] [--config key=value ...]");
-    return;
-  }
-
-  let datasetStr = "";
-  let balance = 100;
-  let payout: number | undefined;
-  const configOverrides: Record<string, unknown> = {};
-
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--dataset" && args[i + 1]) { datasetStr = args[++i]!; continue; }
-    if (args[i] === "--balance" && args[i + 1]) { balance = Number(args[++i]); continue; }
-    if (args[i] === "--payout" && args[i + 1]) { payout = Number(args[++i]); continue; }
-    if (args[i] === "--config" && args[i + 1]) {
-      while (args[i + 1] && !args[i + 1]!.startsWith("--")) {
-        const kv = args[++i]!;
-        const eqIdx = kv.indexOf("=");
-        if (eqIdx > 0) {
-          const key = kv.slice(0, eqIdx);
-          const val = kv.slice(eqIdx + 1);
-          configOverrides[key] = isNaN(Number(val)) ? val : Number(val);
-        }
-      }
-      continue;
-    }
-  }
-
-  if (!datasetStr) {
-    console.error("--dataset is required. Example: --dataset eurusd-feb");
-    return;
-  }
-
+async function backtestRun(
+  agentName: string,
+  datasetStr: string,
+  balance: number,
+  payout: number | undefined,
+  configOverrides: Record<string, unknown>,
+) {
   const datasetNames = datasetStr.split(",").map((s) => s.trim());
 
   // 1. Fetch agent registration
@@ -721,7 +713,7 @@ async function backtestRun(agentName: string) {
     return;
   }
 
-  // 3. Get dataset metadata to extract activeId + candleSize
+  // 3. Get dataset metadata
   const { db: btDb } = await import("../server/db/index.ts");
   const { datasets: dsTable } = await import("../server/db/schema.ts");
   const { eq: eqOp } = await import("drizzle-orm");
@@ -734,7 +726,7 @@ async function backtestRun(agentName: string) {
     return;
   }
 
-  // 3b. Merge config: defaults + dataset-derived values + overrides
+  // 3b. Merge config
   const mergedConfig: Record<string, unknown> = {
     ...(agentInfo.defaultConfig ?? {}),
     activeId: firstDs.activeId,
@@ -781,44 +773,272 @@ async function backtestRun(agentName: string) {
   console.log();
 }
 
-// ─── Command Router ───
+// ─── Yargs CLI ───
 
-const commands: Record<string, () => Promise<void>> = {
-  list: () => list(),
-  stats: () => stats(args[0]!),
-  compare: () => compare(...args),
-  trades: () => listTrades(args[0]!),
-  leaderboard: () => leaderboard(),
-  stop: () => stopRun(args[0]!),
-  events: () => listEvents(args[0]!),
-  replay: () => replayEvents(args[0]!),
-  agents: () => agentsCommand(),
-  dataset: () => datasetCommand(),
-  backtest: () => backtestRun(args[0]!),
+const configOption = {
+  type: "array" as const,
+  string: true as const,
+  describe: "Config overrides: key=value",
+  coerce: coerceConfig,
 };
 
-async function main() {
-  if (!command || !commands[command]) {
-    console.log("Usage: bun run src/cli/cli.ts <command> [args]");
-    console.log("\nCommands:");
-    console.log("  list [running|stopped]     List all runs");
-    console.log("  stats <runId>              Show run stats");
-    console.log("  compare <id1> <id2> ...    Compare runs side-by-side");
-    console.log("  trades <runId>             List trades for a run");
-    console.log("  leaderboard [pnl|winRate]  Best runs ranked");
-    console.log("  stop <runId>               Signal a run to stop");
-    console.log("  events <runId> [--type <t>] [--limit <n>]  List events for a run");
-    console.log("  replay <runId>             Timeline replay of events");
-    console.log("  agents <list|add|remove|run>  Manage agents");
-    console.log("  dataset <create|list|delete>  Manage datasets");
-    console.log("  backtest <agent> --dataset <name> --balance <n>  Run backtest");
-    return;
-  }
-
-  await commands[command]!();
-}
-
-main().catch((err) => {
-  console.error("Error:", err.message ?? err);
-  process.exit(1);
-});
+yargs(hideBin(process.argv))
+  .scriptName("cli")
+  .command(
+    "list [status]",
+    "List all runs",
+    (yargs) =>
+      yargs.positional("status", {
+        type: "string",
+        choices: ["running", "stopped"] as const,
+        describe: "Filter by status",
+      }),
+    async (argv) => {
+      await list(argv.status);
+    },
+  )
+  .command(
+    "stats <runId>",
+    "Show run stats",
+    (yargs) =>
+      yargs.positional("runId", { type: "string", demandOption: true }),
+    async (argv) => {
+      await stats(argv.runId!);
+    },
+  )
+  .command(
+    "compare <ids..>",
+    "Compare runs side-by-side",
+    (yargs) =>
+      yargs.positional("ids", { type: "string", array: true, demandOption: true }),
+    async (argv) => {
+      await compare(argv.ids as string[]);
+    },
+  )
+  .command(
+    "trades <runId>",
+    "List trades for a run",
+    (yargs) =>
+      yargs.positional("runId", { type: "string", demandOption: true }),
+    async (argv) => {
+      await listTrades(argv.runId!);
+    },
+  )
+  .command(
+    "leaderboard [sort]",
+    "Best runs ranked",
+    (yargs) =>
+      yargs.positional("sort", {
+        type: "string",
+        default: "pnl",
+        describe: "Sort by: pnl, winRate",
+      }),
+    async (argv) => {
+      await leaderboard(argv.sort!);
+    },
+  )
+  .command(
+    "stop <runId>",
+    "Signal a run to stop",
+    (yargs) =>
+      yargs.positional("runId", { type: "string", demandOption: true }),
+    async (argv) => {
+      await stopRun(argv.runId!);
+    },
+  )
+  .command(
+    "events <runId>",
+    "List events for a run",
+    (yargs) =>
+      yargs
+        .positional("runId", { type: "string", demandOption: true })
+        .option("type", { type: "string", describe: "Filter by event type" })
+        .option("limit", { type: "number", default: 100, describe: "Max events to fetch" }),
+    async (argv) => {
+      await listEvents(argv.runId!, argv.type, argv.limit);
+    },
+  )
+  .command(
+    "replay <runId>",
+    "Timeline replay of events",
+    (yargs) =>
+      yargs.positional("runId", { type: "string", demandOption: true }),
+    async (argv) => {
+      await replayEvents(argv.runId!);
+    },
+  )
+  .command(
+    "auth",
+    "Manage auth profiles",
+    (yargs) =>
+      yargs
+        .command(
+          "list",
+          "Show profiles",
+          () => {},
+          async () => {
+            await authList();
+          },
+        )
+        .command(
+          "add",
+          "Add profile",
+          (yargs) =>
+            yargs
+              .option("profile", { type: "string", demandOption: true, describe: "Profile name" })
+              .option("email", { type: "string", demandOption: true, describe: "Email address" })
+              .option("password", { type: "string", demandOption: true, describe: "Password" })
+              .option("default", { type: "boolean", default: false, describe: "Set as default" }),
+          async (argv) => {
+            await authAdd(argv.profile, argv.email, argv.password, argv.default);
+          },
+        )
+        .command(
+          "remove <name>",
+          "Remove profile",
+          (yargs) =>
+            yargs.positional("name", { type: "string", demandOption: true }),
+          async (argv) => {
+            await authRemove(argv.name!);
+          },
+        )
+        .command(
+          "default <name>",
+          "Set default profile",
+          (yargs) =>
+            yargs.positional("name", { type: "string", demandOption: true }),
+          async (argv) => {
+            await authDefault(argv.name!);
+          },
+        )
+        .demandCommand(1, "Please specify an auth subcommand."),
+    () => {},
+  )
+  .command(
+    "agents",
+    "Manage agents",
+    (yargs) =>
+      yargs
+        .command(
+          "list",
+          "List registered agents",
+          () => {},
+          async () => {
+            await agentsList();
+          },
+        )
+        .command(
+          "add",
+          "Register an agent",
+          (yargs) =>
+            yargs
+              .option("name", { type: "string", demandOption: true, describe: "Agent name" })
+              .option("path", { type: "string", demandOption: true, describe: "Path to agent file" })
+              .option("description", { type: "string", describe: "Agent description" }),
+          async (argv) => {
+            await agentsAdd(argv.name, argv.path, argv.description);
+          },
+        )
+        .command(
+          "remove <name>",
+          "Unregister an agent",
+          (yargs) =>
+            yargs.positional("name", { type: "string", demandOption: true }),
+          async (argv) => {
+            await agentsRemove(argv.name!);
+          },
+        )
+        .command(
+          "run <name>",
+          "Run an agent",
+          (yargs) =>
+            yargs
+              .positional("name", { type: "string", demandOption: true })
+              .option("active", { type: "number", default: 76, describe: "Asset active ID" })
+              .option("balance", { type: "number", default: 100, describe: "Initial balance" })
+              .option("duration", { type: "number", describe: "Max duration in seconds" })
+              .option("profile", { type: "string", describe: "Auth profile name" })
+              .option("real", { type: "boolean", default: false, describe: "Use real money mode" })
+              .option("config", configOption),
+          async (argv) => {
+            await agentsRun(
+              argv.name!,
+              argv.active,
+              argv.balance,
+              argv.duration,
+              argv.profile,
+              argv.real,
+              (argv.config as Record<string, unknown>) ?? {},
+            );
+          },
+        )
+        .demandCommand(1, "Please specify an agents subcommand."),
+    () => {},
+  )
+  .command(
+    "dataset",
+    "Manage datasets",
+    (yargs) =>
+      yargs
+        .command(
+          "create",
+          "Create a dataset from IQ Option candles",
+          (yargs) =>
+            yargs
+              .option("name", { type: "string", demandOption: true, describe: "Dataset name" })
+              .option("active", { type: "number", demandOption: true, describe: "Asset active ID" })
+              .option("candle-size", { type: "number", demandOption: true, describe: "Candle size in seconds" })
+              .option("from", { type: "string", demandOption: true, describe: "Start date (YYYY-MM-DD)" })
+              .option("to", { type: "string", demandOption: true, describe: "End date (YYYY-MM-DD)" })
+              .option("profile", { type: "string", describe: "Auth profile name" }),
+          async (argv) => {
+            await datasetCreate(argv.name, argv.active, argv.candleSize, argv.from, argv.to, argv.profile);
+          },
+        )
+        .command(
+          "list",
+          "List all datasets",
+          () => {},
+          async () => {
+            await datasetList();
+          },
+        )
+        .command(
+          "delete <name>",
+          "Delete a dataset",
+          (yargs) =>
+            yargs.positional("name", { type: "string", demandOption: true }),
+          async (argv) => {
+            await datasetDelete(argv.name!);
+          },
+        )
+        .demandCommand(1, "Please specify a dataset subcommand."),
+    () => {},
+  )
+  .command(
+    "backtest <agent>",
+    "Run backtest",
+    (yargs) =>
+      yargs
+        .positional("agent", { type: "string", demandOption: true, describe: "Agent name" })
+        .option("dataset", { type: "string", demandOption: true, describe: "Dataset name(s), comma-separated" })
+        .option("balance", { type: "number", default: 100, describe: "Initial balance" })
+        .option("payout", { type: "number", describe: "Payout percentage" })
+        .option("config", configOption),
+    async (argv) => {
+      await backtestRun(
+        argv.agent!,
+        argv.dataset,
+        argv.balance,
+        argv.payout,
+        (argv.config as Record<string, unknown>) ?? {},
+      );
+    },
+  )
+  .demandCommand(1, "Please specify a command. Use --help to see available commands.")
+  .help()
+  .parseAsync()
+  .catch((err: Error) => {
+    console.error("Error:", err.message ?? err);
+    process.exit(1);
+  });
