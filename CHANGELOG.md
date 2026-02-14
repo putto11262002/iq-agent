@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-02-14 (CLI Migration)
+
+### Changed
+- Migrated CLI (`src/cli/cli.ts`) from hand-rolled argument parser to Yargs with subcommands
+- `--config key=value` now properly coerces booleans (`false` → `false`), `null`, numbers, and JSON objects/arrays — previously only coerced numbers, leaving `"false"` as a truthy string
+- All commands and subcommands now support `--help` with auto-generated usage, options, and defaults
+
+### Removed
+- Manual boolean coercion workaround in `src/bot/agents/atrx.ts` (no longer needed with proper CLI coercion)
+
+### Added
+- `yargs` dependency for CLI argument parsing
+
+---
+
 ## 2026-02-14
 
 ### Added
