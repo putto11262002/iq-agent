@@ -63,14 +63,14 @@ export class CandlesAPI {
   async getCandles(
     activeId: number,
     size: number,
-    fromId: number,
-    toId: number,
+    from: number,
+    to: number,
   ): Promise<Candle[]> {
     const res = await this.protocol.sendMessage("get-candles", "2.0", {
       active_id: activeId,
       size,
-      from_id: fromId,
-      to_id: toId,
+      from,
+      to,
     });
     const parsed = CandlesResponseSchema.safeParse(res.msg);
     if (parsed.success) return parsed.data.candles;
